@@ -1,6 +1,7 @@
 import streamlit as st
 import requests, pytz, joblib, math, numpy as np, pandas as pd, re
 from datetime import datetime
+import sklearn  # <--- AJOUTE CETTE LIGNE ICI
 
 # Données socio-éco V54
 DATA_ARRDT = {
