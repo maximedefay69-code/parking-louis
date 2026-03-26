@@ -1,7 +1,29 @@
 import streamlit as st
 import requests, pytz, joblib, math, numpy as np, pandas as pd, re
 from datetime import datetime
-import sklearn  # <--- AJOUTE CETTE LIGNE ICI
+
+# --- 1. DÉFINITION DES FONCTIONS (Indispensable AVANT le chargement du .pkl) ---
+def extraire_nom_propre(adresse):
+    """Nettoyage identique à la version V54 de Colab"""
+    s = adresse.upper()
+    s = re.sub(r'\d+', '', s) # Enlève les numéros
+    mots_a_supprimer = ["RUE DU ", "RUE DES ", "RUE DE LA ", "RUE DE ", "RUE ", "AVENUE ", "BOULEVARD ", "PLACE ", "D'"]
+    for mot in mots_a_supprimer:
+        s = s.replace(mot, "")
+    return s.strip()
+
+# --- 2. CONFIGURATION DE L'INTERFACE ---
+st.set_page_config(page_title="IA Parking Paris", page_icon="🅿️")
+
+# Style pour mobile (bouton large et couleurs)
+st.markdown("""
+    <style>
+    .stButton>button { width: 100%; height: 3em; background-color: #007bff; color: white; border-radius: 10px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🅿️ IA Parking Paris")
+st.caption("Aide au stationnement en temps réel - Version V54")
 
 # Données socio-éco V54
 DATA_ARRDT = {
@@ -14,52 +36,106 @@ DATA_ARRDT = {
     19: {"REV_M": 1833, "VEH": 0.22}, 20: {"REV_M": 1916, "VEH": 0.23}
 }
 
-st.set_page_config(page_title="Parking Paris Live", page_icon="🅿️")
-st.title("🅿️ IA Parking Paris")
-
-# Récupération sécurisée de la clé
-API_KEY_GOOGLE = st.secrets["GOOGLE_API_KEY"]
-
+# --- 3. CHARGEMENT DES MODÈLES ---
 @st.cache_resource
 def load_assets():
-    m = joblib.load("modele_lightgbmDA.pkl")
-    p = joblib.load("preprocessorDA.pkl")
-    return m, p
+    try:
+        m = joblib.load("modele_lightgbmDA.pkl")
+        p = joblib.load("preprocessorDA.pkl")
+        return m, p
+    except Exception as e:
+        st.error(f"Erreur de chargement des fichiers .pkl : {e}")
+        return None, None
 
 model, prepro = load_assets()
 
-adresse = st.text_input("📍 Adresse (ex: 11 rue du commandant lamy) :")
+# Récupération de la clé Google via Secrets
+try:
+    API_KEY_GOOGLE = st.secrets["GOOGLE_API_KEY"]
+except:
+    st.error("Clé API Google manquante dans les Secrets Streamlit.")
+    API_KEY_GOOGLE = None
 
-if st.button("LANCER L'ANALYSE", use_container_width=True):
-    if adresse:
-        with st.spinner('Analyse...'):
-            # Nettoyage
-            nom_pur = re.sub(r'\d+', '', adresse.upper()).replace("RUE DU ","").replace("RUE DE ","").replace("RUE ","").strip()
-            
-            # API Paris
-            res_p = requests.get("https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records", 
-                                 params={"where": f"suggest(nomvoie, '{nom_pur}')", "limit": 100}).json()
-            nb_places = sum(item.get('placal', 0) for item in res_p.get('results', []) if any(r in str(item.get('regpri','')).upper() for r in ["PAYANT", "GRATUIT"])) or 5
+# --- 4. FORMULAIRE UTILISATEUR ---
+adresse_user = st.text_input("📍 Saisissez l'adresse à Paris :", placeholder="ex: 11 rue du commandant lamy")
 
-            # GPS & Trafic
-            geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={adresse.replace(' ', '+')}+Paris&limit=1").json()
-            lat, lon = geo['features'][0]['geometry']['coordinates'][1], geo['features'][0]['geometry']['coordinates'][0]
-            arrdt = int(geo['features'][0]['properties']['postcode'][-2:])
-            
-            t_data = requests.get(f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={lat},{lon}&destinations={lat+0.002},{lon+0.002}&departure_time=now&key={API_KEY_GOOGLE}").json()
-            retard = t_data['rows'][0]['elements'][0]['duration_in_traffic']['value'] - t_data['rows'][0]['elements'][0]['duration']['value'] if 'duration_in_traffic' in t_data['rows'][0]['elements'][0] else 0
-            score_t = 0 if retard < 60 else (50 if retard <= 120 else 100)
+if st.button("ANALYSER LA ZONE"):
+    if not adresse_user:
+        st.warning("Veuillez entrer une adresse.")
+    elif model is None or prepro is None:
+        st.error("L'application n'a pas pu charger les modèles d'IA.")
+    else:
+        with st.spinner('Analyse IA en cours...'):
+            try:
+                # 1. Nettoyage du nom
+                nom_pur = extraire_nom_propre(adresse_user)
+                
+                # 2. API Paris (Places)
+                url_p = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
+                params_p = {"where": f"suggest(nomvoie, '{nom_pur}')", "limit": 100}
+                data_p = requests.get(url_p, params=params_p).json()
+                
+                nb_places = 0
+                if data_p and 'results' in data_p:
+                    for item in data_p['results']:
+                        reg = str(item.get('regpri', '')).upper()
+                        if any(r in reg for r in ["PAYANT", "GRATUIT"]):
+                            nb_places += item.get('placal', 0)
+                
+                if nb_places == 0: nb_places = 5
 
-            # IA
-            now = datetime.now(pytz.timezone('Europe/Paris'))
-            stats = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
-            X = pd.DataFrame([{'RUE': nom_pur, 'VILLE': 'Paris', 'JOUR': now.strftime("%A"), 'MTO': "Beau", 'TRAFIC': score_t, 'NBR PLACES': nb_places, 'REVENUS / H': stats['REV_M'], 'VEHICULES / H': stats['VEH'], 'TEMPERATURE': 18.0, 'HEURE_SIN': np.sin(2*np.pi*(now.hour*60+now.minute)/1440), 'HEURE_COS': np.cos(2*np.pi*(now.hour*60+now.minute)/1440)}])
-            
-            occ = model.predict(prepro.transform(X))[0]
-            libres = max(0, math.floor(nb_places * (1 - occ)))
+                # 3. Géolocalisation & Trafic
+                geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={adresse_user.replace(' ', '+')}+Paris&limit=1").json()
+                feat = geo['features'][0]
+                lat, lon = feat['geometry']['coordinates'][1], feat['geometry']['coordinates'][0]
+                cp = feat['properties']['postcode']
+                arrdt = int(cp[-2:])
 
-            # Affichage
-            st.divider()
-            st.metric("Places Libres Estimées", f"{libres} / {nb_places}")
-            if libres > 2: st.success("🟢 ZONE FACILE")
-            else: st.error("🔴 ZONE SATURÉE")
+                score_trafic_pct = 0
+                if API_KEY_GOOGLE:
+                    t_url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={lat},{lon}&destinations={lat+0.002},{lon+0.002}&departure_time=now&key={API_KEY_GOOGLE}"
+                    t_data = requests.get(t_url).json()
+                    if 'rows' in t_data:
+                        elem = t_data['rows'][0]['elements'][0]
+                        if 'duration_in_traffic' in elem:
+                            retard = elem['duration_in_traffic']['value'] - elem['duration']['value']
+                            score_trafic_pct = 0 if retard < 60 else (50 if retard <= 120 else 100)
+
+                # 4. Prédiction IA
+                now = datetime.now(pytz.timezone('Europe/Paris'))
+                stats = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
+                
+                X = pd.DataFrame([{
+                    'RUE': nom_pur, 'VILLE': 'Paris', 'JOUR': now.strftime("%A"), 'MTO': "Beau",
+                    'TRAFIC': score_trafic_pct, '% PARKING OC': 0.50, 'NBR PLACES': nb_places,
+                    'REVENUS / H': stats['REV_M'], 'VEHICULES / H': stats['VEH'],
+                    'TEMPERATURE': 18.0,
+                    'HEURE_SIN': np.sin(2*np.pi*(now.hour*60+now.minute)/1440),
+                    'HEURE_COS': np.cos(2*np.pi*(now.hour*60+now.minute)/1440)
+                }])
+
+                occ_pred = model.predict(prepro.transform(X))[0]
+                occ_pct = occ_pred * 100
+                libres = max(0, math.floor(nb_places * (1 - occ_pred)))
+
+                # 5. Affichage des résultats
+                st.divider()
+                st.subheader(f"Résultat pour : {nom_pur}")
+                
+                col1, col2 = st.columns(2)
+                col1.metric("Places Libres (IA)", f"{libres}")
+                col2.metric("Occupation", f"{round(occ_pct, 1)}%")
+
+                if libres > 5:
+                    st.success("🟢 VERT : Stationnement facile !")
+                elif libres <= 1:
+                    if occ_pct < 85: st.warning("🟠 ORANGE : Zone tendue.")
+                    else: st.error("🔴 ROUGE : Zone saturée.")
+                else:
+                    if occ_pct < 85: st.success("🟢 VERT : Probabilité correcte.")
+                    else: st.warning("🟠 ORANGE : Soyez patient.")
+
+                st.caption(f"Mis à jour à {now.strftime('%H:%M')} | Arrondissement : {arrdt}")
+
+            except Exception as ex:
+                st.error(f"Erreur lors de l'analyse : {ex}")
