@@ -1,9 +1,9 @@
 import streamlit as st
-import requests, pytz, joblib, math, numpy as np, pandas as pd, re, gspread, json
+import requests, pytz, joblib, math, numpy as np, pandas as pd, gspread, json
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
-# --- 1. DONNÉES SOCIO-ÉCO (INCHANGÉES) ---
+# --- 1. CONFIGURATION & DONNÉES ---
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -14,68 +14,65 @@ DATA_ARRDT = {
     19: {"REV_M": 1833, "VEH": 0.22}, 20: {"REV_M": 1916, "VEH": 0.23}
 }
 
-# --- 2. FONCTIONS API AMÉLIORÉES ---
-def obtenir_places_chirurgical(type_saisi, nom_saisi, arrondissement):
+# --- 2. LA FONCTION DE RECHERCHE "ULTRA-TOLÉRANTE" ---
+def obtenir_places_total(type_louis, nom_louis, arrdt_gps):
     try:
-        nom_cherche = nom_saisi.upper().strip()
+        nom_cherche = nom_louis.upper().strip()
+        # On interroge l'API sur le nom de la voie et l'arrondissement
         url = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
-        
-        # On filtre par arrondissement directement dans la requête API pour plus de rapidité
         params = {
-            "where": f"suggest(nomvoie, '{nom_cherche}') AND arrond = {arrondissement}",
+            "where": f"suggest(nomvoie, '{nom_cherche}') AND arrond = {arrdt_gps}",
             "limit": 100
         }
         
         regimes_valides = ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]
         res = requests.get(url, params=params, timeout=10).json()
         
-        total = 0
-        voies_confirmees = set()
-        
+        somme_places = 0
+        voies_trouvees = []
+
         if res and 'results' in res:
             for item in res['results']:
-                # On recréé le nom complet comme dans l'API (typevoie + nomvoie)
+                # On récupère les données de l'API
                 t_api = str(item.get('typevoie', '')).upper()
                 n_api = str(item.get('nomvoie', '')).upper()
-                nom_complet_api = f"{t_api} {n_api}"
-                
-                # Vérification : le nom saisi est dans le nomvoie ET le type correspond (RUE, AV, BD...)
-                if nom_cherche in n_api:
-                    # On est flexible sur le type (AV vs AVENUE)
-                    type_match = False
-                    if type_saisi.upper() == "BOULEVARD" and ("BD" in t_api or "BOULEVARD" in t_api): type_match = True
-                    elif type_saisi.upper() == "AVENUE" and ("AV" in t_api or "AVENUE" in t_api): type_match = True
-                    elif type_saisi.upper() in t_api: type_match = True
-                    
-                    if type_match:
-                        regime = str(item.get('regpri', '')).upper()
-                        if any(r in regime for r in regimes_valides):
-                            total += item.get('placal', 0)
-                            voies_confirmees.add(nom_complet_api)
-        
-        return total, list(voies_confirmees)
-    except:
-        return 15, ["Erreur API"]
+                regime = str(item.get('regpri', '')).upper()
+                nb_places_segment = item.get('placal', 0) # C'est ta colonne "Nombre de places réelles"
 
-# --- 3. LOGIQUE METEO / SHEETS (INCHANGÉE) ---
-def save_to_google_sheets(data_row):
+                # Logique de correspondance du TYPE (Boulevard -> BD, etc.)
+                match_type = False
+                t_louis_up = type_louis.upper()
+                
+                if t_louis_up == "BOULEVARD" and ("BD" in t_api or "BOULEVARD" in t_api): match_type = True
+                elif t_louis_up == "AVENUE" and ("AV" in t_api or "AVENUE" in t_api): match_type = True
+                elif t_louis_up in t_api: match_type = True # Pour Rue, Place, Quai...
+
+                # Si le nom correspond ET le type correspond ET le régime est valide
+                if nom_cherche in n_api and match_type:
+                    if any(r in regime for r in regimes_valides):
+                        somme_places += nb_places_segment
+                        voies_trouvees.append(f"{t_api} {n_api} ({regime})")
+        
+        # On dédoublonne les noms pour l'affichage
+        voies_uniques = list(set(voies_trouvees))
+        return somme_places, voies_uniques
+    except:
+        return 15, ["Erreur API - Valeur par défaut utilisée"]
+
+# --- 3. AUTRES FONCTIONS (INCHANGÉES) ---
+def save_to_sheets(row):
     try:
-        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        creds_dict = json.loads(st.secrets["gcp_service_account"]["json_data"])
-        credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
-        client = gspread.authorize(credentials)
-        sheet = client.open("SLOT_Beta1").sheet1
-        sheet.append_row(data_row)
+        creds = Credentials.from_service_account_info(json.loads(st.secrets["gcp_service_account"]["json_data"]), 
+                scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+        gspread.authorize(creds).open("SLOT_Beta1").sheet1.append_row(row)
         return True
     except: return False
 
-def get_live_weather(lat, lon):
+def get_weather(lat, lon):
     try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code"
-        res = requests.get(url, timeout=5).json()
-        code = res['current']['weather_code']
-        mto = "Beau" if code in [0, 1] else ("Nuageux" if code in [2, 3, 45, 48] else "Pluie")
-        return mto, res['current']['temperature_2m']
+        r = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code").json()
+        m = "Beau" if r['current']['weather_code'] in [0,1] else ("Nuageux" if r['current']['weather_code'] in [2,3,45,48] else "Pluie")
+        return m, r['current']['temperature_2m']
     except: return "Beau", 18.0
 
 @st.cache_resource
@@ -86,75 +83,71 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 4. INTERFACE ---
-st.set_page_config(page_title="IA Parking Paris", page_icon="🅿️")
-st.title("🅿️ Collecte Terrain V59")
+st.set_page_config(page_title="SLOT - Collecte", page_icon="🅿️")
+st.title("🅿️ SLOT - Assistant Terrain")
 
-c1, c2, c3 = st.columns([1, 1.5, 2.5])
-num_voie = c1.text_input("N°")
-type_voie = c2.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse"])
-nom_rue = c3.text_input("Nom (ex: Rivoli)")
+col1, col2, col3 = st.columns([1, 2, 3])
+num_voie = col1.text_input("N°")
+type_voie = col2.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse"])
+nom_rue_saisi = col3.text_input("Nom (ex: Rivoli)")
 
-if st.button("🔍 ANALYSER LA ZONE"):
-    if not nom_rue:
-        st.warning("Précisez la rue.")
+if st.button("🚀 ANALYSER LA RUE"):
+    if not nom_rue_saisi:
+        st.error("Veuillez saisir un nom de rue.")
     else:
-        with st.spinner('Géolocalisation...'):
-            query = f"{num_voie} {type_voie} {nom_rue} Paris"
-            geo_res = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={query.replace(' ', '+')}&limit=1").json()
+        with st.spinner("Analyse en cours..."):
+            # A. GÉOLOCALISATION
+            geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={num_voie}+{type_voie}+{nom_rue_saisi}+Paris&limit=1").json()
             
-            if 'features' in geo_res and len(geo_res['features']) > 0:
-                feat = geo_res['features'][0]
-                lat, lon = feat['geometry']['coordinates'][1], feat['geometry']['coordinates'][0]
-                arrdt = int(feat['properties']['postcode'][-2:])
+            if 'features' in geo and len(geo['features']) > 0:
+                f = geo['features'][0]
+                lat, lon = f['geometry']['coordinates'][1], f['geometry']['coordinates'][0]
+                cp = f['properties']['postcode']
+                arrdt = int(cp[-2:])
                 
-                # --- NOUVELLE LOGIQUE CHIRURGICALE ---
-                # On passe l'arrondissement trouvé par le GPS à l'API de stationnement
-                nb_places, voies = obtenir_places_chirurgical(type_voie, nom_rue, arrdt)
+                # B. SOMME DES PLACES OPEN DATA (CHIRURGICAL)
+                total_places_api, liste_voies = obtenir_places_total(type_voie, nom_rue_saisi, arrdt)
                 
+                # C. MÉTÉO & SOCIO
+                mto, temp = get_weather(lat, lon)
                 socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
-                mto, temp = get_live_weather(lat, lon)
                 
-                # Trafic
-                score_t = 0
-                if st.secrets.get("GOOGLE_API_KEY"):
-                    try:
-                        t_url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={lat},{lon}&destinations={lat+0.001},{lon+0.001}&departure_time=now&key={st.secrets['GOOGLE_API_KEY']}"
-                        r = requests.get(t_url).json()
-                        diff = r['rows'][0]['elements'][0]['duration_in_traffic']['value'] - r['rows'][0]['elements'][0]['duration']['value']
-                        score_t = 100 if diff > 120 else (50 if diff > 60 else 0)
-                    except: pass
-
-                # IA
+                # D. PRÉDICTION
                 now = datetime.now(pytz.timezone('Europe/Paris'))
-                X = pd.DataFrame([{
-                    'RUE': nom_rue.upper(), 'VILLE': 'Paris', 'JOUR': now.strftime("%A"), 
-                    'MTO': mto, 'TRAFIC': score_t, '% PARKING OC': 0.50, 
-                    'NBR PLACES': nb_places, 'REVENUS / H': socio["REV_M"], 
+                df_ia = pd.DataFrame([{
+                    'RUE': nom_rue_saisi.upper(), 'VILLE': 'Paris', 'JOUR': now.strftime("%A"), 
+                    'MTO': mto, 'TRAFIC': 0, '% PARKING OC': 0.50, 
+                    'NBR PLACES': total_places_api, 'REVENUS / H': socio["REV_M"], 
                     'VEHICULES / H': socio["VEH"], 'TEMPERATURE': temp,
                     'HEURE_SIN': np.sin(2*np.pi*(now.hour*60+now.minute)/1440),
                     'HEURE_COS': np.cos(2*np.pi*(now.hour*60+now.minute)/1440)
                 }])
                 
-                occ = model.predict(prepro.transform(X))[0]
-                libres = max(0, math.floor(nb_places * (1 - occ)))
+                occ = model.predict(prepro.transform(df_ia))[0]
+                libres = max(0, math.floor(total_places_api * (1 - occ)))
 
-                st.info(f"📍 Arrondissement détecté : {arrdt}e")
-                st.success(f"✅ {nb_places} places trouvées (API Paris) sur : {', '.join(voies)}")
-                st.metric("Estimation places libres", f"{libres} PLACES")
+                # --- AFFICHAGE POUR LOUIS ---
+                st.markdown(f"### 📍 Résultats pour le {arrdt}ème")
                 
-                st.session_state['releve'] = {
-                    "Date": now.strftime("%d/%m/%Y"), "Heure": now.strftime("%H:%M"),
-                    "Num": num_voie, "Rue": f"{type_voie} {nom_rue}", "Arrdt": arrdt,
-                    "Pred_P": libres, "Pred_O": f"{round(occ*100)}%",
-                    "Mto": mto, "Temp": f"{temp}°C", "Trafic": score_t, "Total": nb_places
-                }
-            else:
-                st.error("Adresse non trouvée.")
+                # La "Feature" demandée : Nombre de places réelles trouvées
+                st.info(f"🔍 **Open Data Paris :** J'ai trouvé un total de **{total_places_api} places** (Regimes: Payant/Gratuit).")
+                with st.expander("Détails des segments trouvés"):
+                    for v in liste_voies: st.write(f"- {v}")
 
-if 'releve' in st.session_state:
+                st.success(f"🤖 **Prédiction SLOT :** Environ **{libres} places libres** actuellement.")
+                
+                st.session_state['data'] = [now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), num_voie, 
+                                           f"{type_voie} {nom_rue_saisi}", arrdt, libres, f"{round(occ*100)}%", 
+                                           0, mto, temp, 0, total_places_api]
+            else:
+                st.error("Rue non reconnue par le GPS.")
+
+if 'data' in st.session_state:
     st.divider()
-    reel = st.number_input("Places RÉELLES libres ?", min_value=0, step=1)
-    if st.button("💾 SAUVEGARDER"):
-        d = st.session_state['releve']
-        if save_to_google_sheets([d["Date"], d["Heure"], d["Num"], d["Rue"], d["Arrdt"], d["Pred_P"], d["Pred_O"], reel, d["Mto"], d["Temp"], d["Trafic"], d["Total"]]):
-            st.balloons(); st.success("Données envoyées !"); del st.session_state['releve']
+    reel = st.number_input("Combien de places vois-tu réellement ?", min_value=0)
+    if st.button("💾 ENREGISTRER LE RELEVÉ"):
+        st.session_state['data'][7] = reel
+        if save_to_sheets(st.session_state['data']):
+            st.balloons()
+            st.success("Relevé enregistré dans SLOT_Beta1 !")
+            del st.session_state['data']
