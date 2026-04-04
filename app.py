@@ -1,8 +1,32 @@
 import streamlit as st
 import requests, pytz, joblib, math, numpy as np, pandas as pd, json
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- 1. CONFIGURATION & DICTIONNAIRES ---
+# --- 1. CONNEXION VIA SECRETS (Format JSON string) ---
+def save_to_google_sheets(data_row):
+    try:
+        # On récupère la chaîne JSON brute stockée dans le secret
+        raw_json = st.secrets["gcp_service_account"]["json_data"]
+        info = json.loads(raw_json)
+        
+        # Authentification
+        creds = Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        )
+        
+        client = gspread.authorize(creds)
+        # Ouvre ton fichier de destination
+        sheet = client.open("SLOT_Beta1").sheet1
+        sheet.append_row(data_row)
+        return True
+    except Exception as e:
+        st.error(f"❌ Erreur de connexion Google Sheets : {e}")
+        return False
+
+# --- 2. CONFIGURATION ---
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -18,28 +42,32 @@ JOURS_FR = {
     "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche"
 }
 
-# --- 2. FONCTIONS DE RÉCUPÉRATION DYNAMIQUES ---
-
-def obtenir_places_total(type_louis, nom_louis, arrdt_gps):
+# --- 3. FONCTIONS DYNAMIQUES ---
+def obtenir_places_total(type_v, nom_v, arrdt):
     try:
-        nom_cherche = nom_louis.upper().strip()
+        nom_c = nom_v.upper().strip()
         url = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
-        params = {"where": f"suggest(nomvoie, '{nom_cherche}') AND arrond = {arrdt_gps}", "limit": 100}
+        params = {"where": f"suggest(nomvoie, '{nom_c}') AND arrond = {arrdt}", "limit": 100}
         res = requests.get(url, params=params, timeout=10).json()
-        somme_p, voies = 0, []
-        if res and 'results' in res:
-            for item in res['results']:
-                t_api, n_api, reg, p = str(item.get('typevoie','')).upper(), str(item.get('nomvoie','')).upper(), str(item.get('regpri','')).upper(), item.get('placal', 0)
+        s, v = 0, []
+        if 'results' in res:
+            for i in res['results']:
+                t_api = str(i.get('typevoie','')).upper()
+                n_api = str(i.get('nomvoie','')).upper()
+                reg = str(i.get('regpri','')).upper()
+                p = i.get('placal', 0)
+                
                 match = False
-                tl = type_louis.upper()
+                tl = type_v.upper()
                 if tl == "BOULEVARD" and ("BD" in t_api or "BOULEVARD" in t_api): match = True
                 elif tl == "AVENUE" and ("AV" in t_api or "AVENUE" in t_api): match = True
                 elif tl in t_api: match = True
-                if nom_cherche in n_api and match:
+                
+                if nom_c in n_api and match:
                     if any(r in reg for r in ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]):
-                        somme_p += p
-                        voies.append(f"{t_api} {n_api}")
-        return somme_p, list(set(voies))
+                        s += p
+                        v.append(f"{t_api} {n_api}")
+        return s, list(set(v))
     except: return 15, ["Erreur API"]
 
 def get_weather(lat, lon):
@@ -57,44 +85,40 @@ def load_assets():
 
 model, prepro = load_assets()
 
-# --- 3. INTERFACE STREAMLIT ---
-st.set_page_config(page_title="SLOT V66", layout="wide")
-st.title("🅿️ SLOT - Collecte & IA")
+# --- 4. INTERFACE ---
+st.set_page_config(page_title="SLOT V70", layout="wide")
+st.title("🅿️ SLOT - Assistant Terrain")
 
-col_in1, col_in2, col_in3 = st.columns([1, 2, 3])
-num_v = col_in1.text_input("N°")
-type_v = col_in2.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse"])
-nom_v = col_in3.text_input("Nom de la rue (ex: Rivoli)")
+c1, c2, c3 = st.columns([1, 2, 3])
+num_v = c1.text_input("N°")
+type_v = c2.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse"])
+nom_v = c3.text_input("Nom de la rue")
 
-if st.button("🚀 ANALYSER LA RUE"):
-    if not nom_v:
-        st.warning("Précise le nom de la rue !")
-    else:
-        with st.spinner("Collecte des données..."):
+if st.button("🚀 ANALYSER"):
+    if nom_v:
+        with st.spinner("Analyse..."):
             geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={num_v}+{type_v}+{nom_v}+Paris&limit=1").json()
-            
             if 'features' in geo and len(geo['features']) > 0:
                 f = geo['features'][0]
                 lat, lon = f['geometry']['coordinates'][1], f['geometry']['coordinates'][0]
                 arrdt = int(f['properties']['postcode'][-2:])
                 
                 total_p, liste_v = obtenir_places_total(type_v, nom_v, arrdt)
-                mto_label, temp_val = get_weather(lat, lon)
+                mto, temp = get_weather(lat, lon)
                 socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
                 
-                tz = pytz.timezone('Europe/Paris')
-                now = datetime.now(tz)
-                minutes_total = now.hour * 60 + now.minute
+                now = datetime.now(pytz.timezone('Europe/Paris'))
+                minutes = now.hour * 60 + now.minute
                 
-                # --- PANEL DE CONTRÔLE LOUIS ---
-                st.subheader("📊 Données lues en temps réel")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Météo", mto_label)
-                c2.metric("Température", f"{temp_val}°C")
-                c3.metric("Trafic", "0.0")
-                c4.metric("Places (OpenData)", total_p)
+                # Panel de Contrôle pour Louis (println)
+                st.subheader("📊 Panel de Contrôle")
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Météo", mto)
+                k2.metric("Temp", f"{temp}°C")
+                k3.metric("Trafic", "0.0")
+                k4.metric("Places", total_p)
 
-                # --- PRÉPARATION DES 15 FEATURES ---
+                # --- 15 FEATURES (Ordre strict) ---
                 X_dict = {
                     'DATE': now.strftime("%d/%m/%Y"),
                     'JOUR': JOURS_FR.get(now.strftime("%A")),
@@ -106,57 +130,37 @@ if st.button("🚀 ANALYSER LA RUE"):
                     'NBR PLACES': total_p,
                     'REVENUS / H': socio["REV_M"],
                     'VEHICULES / H': socio["VEH"],
-                    'MTO': mto_label,
-                    'TEMPERATURE': temp_val,
-                    'HEURE_MINUTES': minutes_total,
-                    'HEURE_SIN': np.sin(2 * np.pi * minutes_total / 1440),
-                    'HEURE_COS': np.cos(2 * np.pi * minutes_total / 1440)
+                    'MTO': mto,
+                    'TEMPERATURE': temp,
+                    'HEURE_MINUTES': minutes,
+                    'HEURE_SIN': np.sin(2 * np.pi * minutes / 1440),
+                    'HEURE_COS': np.cos(2 * np.pi * minutes / 1440)
                 }
                 
-                X_df = pd.DataFrame([X_dict])
-                colonnes_15 = ['DATE','JOUR','HEURE','RUE','VILLE','TRAFIC','% PARKING OC','NBR PLACES','REVENUS / H','VEHICULES / H','MTO','TEMPERATURE','HEURE_MINUTES','HEURE_SIN','HEURE_COS']
-                X_df = X_df[colonnes_15]
+                X_df = pd.DataFrame([X_dict])[['DATE','JOUR','HEURE','RUE','VILLE','TRAFIC','% PARKING OC','NBR PLACES','REVENUS / H','VEHICULES / H','MTO','TEMPERATURE','HEURE_MINUTES','HEURE_SIN','HEURE_COS']]
 
                 try:
-                    X_trans = prepro.transform(X_df)
-                    occ_pred = model.predict(X_trans)[0]
-                    libres = max(0, math.floor(total_p * (1 - occ_pred)))
-                    
+                    occ = model.predict(prepro.transform(X_df))[0]
+                    libres = max(0, math.floor(total_p * (1 - occ)))
                     st.divider()
-                    st.success(f"🤖 **Résultat IA :** Environ **{libres} places libres**.")
+                    st.success(f"🤖 IA : **{libres} places libres**.")
                     
-                    # Sauvegarde pour Google Sheets
-                    st.session_state['data_save'] = {
-                        "date": now.strftime("%d/%m/%Y"),
-                        "heure": now.strftime("%H:%M"),
-                        "adresse": f"{num_v} {type_v} {nom_v}",
-                        "arrdt": arrdt,
-                        "ia_pred": libres,
-                        "occ_score": f"{round(occ_pred*100)}%",
-                        "mto": mto_label,
-                        "temp": temp_val,
-                        "total_p": total_p
-                    }
-                except Exception as e:
-                    st.error(f"Erreur modèle : {e}")
-            else:
-                st.error("Adresse introuvable.")
+                    # Stockage session pour enregistrement
+                    st.session_state['save'] = [
+                        now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), f"{num_v} {type_v} {nom_v}",
+                        arrdt, libres, mto, temp, total_p, f"{round(occ*100)}%"
+                    ]
+                except Exception as e: st.error(f"Erreur IA : {e}")
 
-# --- 4. VALIDATION TERRAIN & ENREGISTREMENT ---
-if 'data_save' in st.session_state:
+# --- 5. ENREGISTREMENT ---
+if 'save' in st.session_state:
     st.divider()
-    st.subheader("📝 Validation Terrain par Louis")
+    col_v1, col_v2 = st.columns(2)
+    reel = col_v1.number_input("Places réelles :", min_value=0, step=1)
+    note = col_v2.text_input("Note")
     
-    reel = st.number_input("Combien de places vois-tu réellement ?", min_value=0, step=1)
-    note = st.text_input("Commentaire libre (optionnel)")
-    
-    if st.button("💾 ENREGISTRER DANS GOOGLE SHEETS"):
-        # Ici Louis, tu ajouteras ta logique gspread (wks.append_row)
-        # On prépare la ligne finale
-        d = st.session_state['data_save']
-        ligne_a_sauver = [d['date'], d['heure'], d['adresse'], d['arrdt'], d['ia_pred'], reel, d['occ_score'], d['mto'], d['temp'], d['total_p'], note]
-        
-        st.write("Données envoyées :", ligne_a_sauver)
-        st.balloons()
-        st.success("Relevé terrain enregistré avec succès !")
-        del st.session_state['data_save']
+    if st.button("💾 ENVOYER AU SHEETS"):
+        if save_to_google_sheets(st.session_state['save'] + [reel, note]):
+            st.balloons()
+            st.success("✅ Données enregistrées dans SLOT_Beta1 !")
+            del st.session_state['save']
