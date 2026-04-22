@@ -41,7 +41,6 @@ def obtenir_trafic_google(lat, lon):
             score = 50
         else:
             score = 100
-        # On retourne le score ET l'écart pour l'affichage
         return float(score), int(ecart_secondes)
     except:
         return 0.0, 0
@@ -131,12 +130,11 @@ if st.button("🚀 ANALYSER"):
                 minutes = now.hour * 60 + now.minute
                 
                 st.subheader("📊 Panel de Contrôle")
-                # On passe à 5 colonnes pour afficher l'écart
                 k1, k2, k3, k4, k5 = st.columns(5)
                 k1.metric("Météo", mto)
                 k2.metric("Temp", f"{temp}°C")
                 k3.metric("Score Trafic", f"{val_trafic}%")
-                k4.metric("Écart Temps", f"{ecart_sec}s") # <--- Nouvel affichage pour Louis
+                k4.metric("Écart Temps", f"{ecart_sec}s")
                 k5.metric("Places", total_p)
 
                 X_dict = {
@@ -165,10 +163,18 @@ if st.button("🚀 ANALYSER"):
                     st.divider()
                     st.success(f"🤖 IA : **{libres} places libres**.")
                     
-                    # On garde val_trafic (le score) pour le Sheets
+                    # MODIFICATION ICI : On enregistre seulement nom_v.upper() 
                     st.session_state['save'] = [
-                        now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), f"{num_v} {type_v} {nom_v}",
-                        arrdt, libres, mto, temp, val_trafic, total_p, f"{round(occ*100)}%"
+                        now.strftime("%d/%m/%Y"), 
+                        now.strftime("%H:%M"), 
+                        nom_v.upper(), # <--- On ne garde que le nom pur (ex: VOLTAIRE)
+                        arrdt, 
+                        libres, 
+                        mto, 
+                        temp, 
+                        val_trafic, 
+                        total_p, 
+                        f"{round(occ*100)}%"
                     ]
                 except Exception as e: st.error(f"Erreur IA : {e}")
 
