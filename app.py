@@ -9,12 +9,10 @@ def save_to_google_sheets(data_row):
     try:
         raw_json = st.secrets["gcp_service_account"]["json_data"]
         info = json.loads(raw_json)
-        
         creds = Credentials.from_service_account_info(
             info,
             scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         )
-        
         client = gspread.authorize(creds)
         sheet = client.open("SLOT_Beta1").sheet1
         sheet.append_row(data_row)
@@ -23,7 +21,34 @@ def save_to_google_sheets(data_row):
         st.error(f"❌ Erreur de connexion Google Sheets : {e}")
         return False
 
-# --- 2. CONFIGURATION ---
+# --- 2. FONCTION TRAFIC DYNAMIQUE (GOOGLE MAPS) ---
+def obtenir_trafic_google(lat, lon):
+    try:
+        # Utilise la clé API stockée dans tes secrets
+        API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
+        orig = f"{lat},{lon}"
+        # Point B décalé pour simuler un trajet local de test
+        dest = f"{lat + 0.005},{lon + 0.005}" 
+        url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={orig}&destinations={dest}&departure_time=now&traffic_model=best_guess&key={API_KEY}"
+        
+        res = requests.get(url, timeout=5).json()
+        s_reel = res['rows'][0]['elements'][0]['duration_in_traffic']['value']
+        s_base = res['rows'][0]['elements'][0]['duration']['value']
+        
+        ecart_secondes = (s_reel - s_base)
+        
+        # Tes nouveaux seuils :
+        if ecart_secondes < 30:
+            score = 0
+        elif ecart_secondes < 120: # 2 minutes
+            score = 50
+        else:
+            score = 100
+        return float(score)
+    except:
+        return 0.0 # Valeur de secours si l'API échoue
+
+# --- 3. CONFIGURATION & ASSETS ---
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -39,7 +64,6 @@ JOURS_FR = {
     "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche"
 }
 
-# --- 3. FONCTIONS DYNAMIQUES ---
 def obtenir_places_total(type_v, nom_v, arrdt):
     try:
         nom_c = nom_v.upper().strip()
@@ -51,17 +75,13 @@ def obtenir_places_total(type_v, nom_v, arrdt):
             for i in res['results']:
                 t_api = str(i.get('typevoie','')).upper()
                 n_api = str(i.get('nomvoie','')).upper()
-                reg = i.get('regpri', '')
-                if reg is None: reg = ""
-                reg = str(reg).upper()
+                reg = str(i.get('regpri', '')).upper()
                 p = i.get('placal', 0)
-                
                 match = False
                 tl = type_v.upper()
                 if tl == "BOULEVARD" and ("BD" in t_api or "BOULEVARD" in t_api): match = True
                 elif tl == "AVENUE" and ("AV" in t_api or "AVENUE" in t_api): match = True
                 elif tl in t_api: match = True
-                
                 if nom_c in n_api and match:
                     if any(r in reg for r in ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]):
                         s += p
@@ -85,7 +105,7 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 4. INTERFACE ---
-st.set_page_config(page_title="SLOT V70 - Benchmark", layout="wide")
+st.set_page_config(page_title="SLOT V70", layout="wide")
 st.title("🅿️ SLOT - Assistant Terrain")
 
 c1, c2, c3 = st.columns([1, 2, 3])
@@ -104,8 +124,11 @@ if st.button("🚀 ANALYSER"):
                 
                 total_p, liste_v = obtenir_places_total(type_v, nom_v, arrdt)
                 mto, temp = get_weather(lat, lon)
-                socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
                 
+                # RÉCUPÉRATION DU TRAFIC RÉEL
+                val_trafic = obtenir_trafic_google(lat, lon)
+                
+                socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
                 now = datetime.now(pytz.timezone('Europe/Paris'))
                 minutes = now.hour * 60 + now.minute
                 
@@ -113,7 +136,7 @@ if st.button("🚀 ANALYSER"):
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Météo", mto)
                 k2.metric("Temp", f"{temp}°C")
-                k3.metric("Trafic", "0.0")
+                k3.metric("Trafic", val_trafic)
                 k4.metric("Places", total_p)
 
                 X_dict = {
@@ -122,7 +145,7 @@ if st.button("🚀 ANALYSER"):
                     'HEURE': now.strftime("%H:%M"),
                     'RUE': nom_v.upper(),
                     'VILLE': "Paris",
-                    'TRAFIC': 0.0,
+                    'TRAFIC': val_trafic, # Donnée dynamique envoyée au modèle
                     '% PARKING OC': 0.5,
                     'NBR PLACES': total_p,
                     'REVENUS / H': socio["REV_M"],
@@ -144,27 +167,23 @@ if st.button("🚀 ANALYSER"):
                     
                     st.session_state['save'] = [
                         now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), f"{num_v} {type_v} {nom_v}",
-                        arrdt, libres, mto, temp, total_p, f"{round(occ*100)}%"
+                        arrdt, libres, mto, temp, val_trafic, total_p, f"{round(occ*100)}%"
                     ]
                 except Exception as e: st.error(f"Erreur IA : {e}")
 
-# --- 5. ENREGISTREMENT & BENCHMARK ---
+# --- 5. ENREGISTREMENT & BENCHMARK PARKNAV ---
 if 'save' in st.session_state:
     st.divider()
     st.subheader("🏁 Benchmark Terrain")
     col_v1, col_v2, col_v3 = st.columns([1, 1, 2])
     
     reel = col_v1.number_input("Places réelles :", min_value=0, step=1)
-    
-    # AJOUT DU MENU PARKNAV
     parknav = col_v2.selectbox("Parknav :", ["Vert", "Orange", "Rouge", "Gris (N/C)"])
-    
     note = col_v3.text_input("Note libre")
     
     if st.button("💾 ENVOYER AU SHEETS"):
-        # On ajoute reel, parknav et note à la liste existante dans session_state
         if save_to_google_sheets(st.session_state['save'] + [reel, parknav, note]):
             st.balloons()
-            st.success("✅ Données enregistrées dans SLOT_Beta1 !")
+            st.success("✅ Données enregistrées (IA + Trafic + Réel + Parknav) !")
             del st.session_state['save']
             st.rerun()
