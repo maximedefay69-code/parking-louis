@@ -24,10 +24,8 @@ def save_to_google_sheets(data_row):
 # --- 2. FONCTION TRAFIC DYNAMIQUE (GOOGLE MAPS) ---
 def obtenir_trafic_google(lat, lon):
     try:
-        # Utilise la clé API stockée dans tes secrets
         API_KEY = st.secrets["GOOGLE_MAPS_API_KEY"]
         orig = f"{lat},{lon}"
-        # Point B décalé pour simuler un trajet local de test
         dest = f"{lat + 0.005},{lon + 0.005}" 
         url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={orig}&destinations={dest}&departure_time=now&traffic_model=best_guess&key={API_KEY}"
         
@@ -37,16 +35,16 @@ def obtenir_trafic_google(lat, lon):
         
         ecart_secondes = (s_reel - s_base)
         
-        # Tes nouveaux seuils :
         if ecart_secondes < 30:
             score = 0
-        elif ecart_secondes < 120: # 2 minutes
+        elif ecart_secondes < 120:
             score = 50
         else:
             score = 100
-        return float(score)
+        # On retourne le score ET l'écart pour l'affichage
+        return float(score), int(ecart_secondes)
     except:
-        return 0.0 # Valeur de secours si l'API échoue
+        return 0.0, 0
 
 # --- 3. CONFIGURATION & ASSETS ---
 DATA_ARRDT = {
@@ -125,19 +123,21 @@ if st.button("🚀 ANALYSER"):
                 total_p, liste_v = obtenir_places_total(type_v, nom_v, arrdt)
                 mto, temp = get_weather(lat, lon)
                 
-                # RÉCUPÉRATION DU TRAFIC RÉEL
-                val_trafic = obtenir_trafic_google(lat, lon)
+                # RÉCUPÉRATION DU TRAFIC ET DE L'ÉCART
+                val_trafic, ecart_sec = obtenir_trafic_google(lat, lon)
                 
                 socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
                 now = datetime.now(pytz.timezone('Europe/Paris'))
                 minutes = now.hour * 60 + now.minute
                 
                 st.subheader("📊 Panel de Contrôle")
-                k1, k2, k3, k4 = st.columns(4)
+                # On passe à 5 colonnes pour afficher l'écart
+                k1, k2, k3, k4, k5 = st.columns(5)
                 k1.metric("Météo", mto)
                 k2.metric("Temp", f"{temp}°C")
-                k3.metric("Trafic", val_trafic)
-                k4.metric("Places", total_p)
+                k3.metric("Score Trafic", f"{val_trafic}%")
+                k4.metric("Écart Temps", f"{ecart_sec}s") # <--- Nouvel affichage pour Louis
+                k5.metric("Places", total_p)
 
                 X_dict = {
                     'DATE': now.strftime("%d/%m/%Y"),
@@ -145,7 +145,7 @@ if st.button("🚀 ANALYSER"):
                     'HEURE': now.strftime("%H:%M"),
                     'RUE': nom_v.upper(),
                     'VILLE': "Paris",
-                    'TRAFIC': val_trafic, # Donnée dynamique envoyée au modèle
+                    'TRAFIC': val_trafic,
                     '% PARKING OC': 0.5,
                     'NBR PLACES': total_p,
                     'REVENUS / H': socio["REV_M"],
@@ -165,6 +165,7 @@ if st.button("🚀 ANALYSER"):
                     st.divider()
                     st.success(f"🤖 IA : **{libres} places libres**.")
                     
+                    # On garde val_trafic (le score) pour le Sheets
                     st.session_state['save'] = [
                         now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), f"{num_v} {type_v} {nom_v}",
                         arrdt, libres, mto, temp, val_trafic, total_p, f"{round(occ*100)}%"
