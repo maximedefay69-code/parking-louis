@@ -4,21 +4,18 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- 1. CONNEXION VIA SECRETS (Format JSON string) ---
+# --- 1. CONNEXION VIA SECRETS ---
 def save_to_google_sheets(data_row):
     try:
-        # On récupère la chaîne JSON brute stockée dans le secret
         raw_json = st.secrets["gcp_service_account"]["json_data"]
         info = json.loads(raw_json)
         
-        # Authentification
         creds = Credentials.from_service_account_info(
             info,
             scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         )
         
         client = gspread.authorize(creds)
-        # Ouvre ton fichier de destination
         sheet = client.open("SLOT_Beta1").sheet1
         sheet.append_row(data_row)
         return True
@@ -54,7 +51,9 @@ def obtenir_places_total(type_v, nom_v, arrdt):
             for i in res['results']:
                 t_api = str(i.get('typevoie','')).upper()
                 n_api = str(i.get('nomvoie','')).upper()
-                reg = str(i.get('regpri','')).upper()
+                reg = i.get('regpri', '')
+                if reg is None: reg = ""
+                reg = str(reg).upper()
                 p = i.get('placal', 0)
                 
                 match = False
@@ -86,7 +85,7 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 4. INTERFACE ---
-st.set_page_config(page_title="SLOT V70", layout="wide")
+st.set_page_config(page_title="SLOT V70 - Benchmark", layout="wide")
 st.title("🅿️ SLOT - Assistant Terrain")
 
 c1, c2, c3 = st.columns([1, 2, 3])
@@ -110,7 +109,6 @@ if st.button("🚀 ANALYSER"):
                 now = datetime.now(pytz.timezone('Europe/Paris'))
                 minutes = now.hour * 60 + now.minute
                 
-                # Panel de Contrôle pour Louis (println)
                 st.subheader("📊 Panel de Contrôle")
                 k1, k2, k3, k4 = st.columns(4)
                 k1.metric("Météo", mto)
@@ -118,7 +116,6 @@ if st.button("🚀 ANALYSER"):
                 k3.metric("Trafic", "0.0")
                 k4.metric("Places", total_p)
 
-                # --- 15 FEATURES (Ordre strict) ---
                 X_dict = {
                     'DATE': now.strftime("%d/%m/%Y"),
                     'JOUR': JOURS_FR.get(now.strftime("%A")),
@@ -145,22 +142,29 @@ if st.button("🚀 ANALYSER"):
                     st.divider()
                     st.success(f"🤖 IA : **{libres} places libres**.")
                     
-                    # Stockage session pour enregistrement
                     st.session_state['save'] = [
                         now.strftime("%d/%m/%Y"), now.strftime("%H:%M"), f"{num_v} {type_v} {nom_v}",
                         arrdt, libres, mto, temp, total_p, f"{round(occ*100)}%"
                     ]
                 except Exception as e: st.error(f"Erreur IA : {e}")
 
-# --- 5. ENREGISTREMENT ---
+# --- 5. ENREGISTREMENT & BENCHMARK ---
 if 'save' in st.session_state:
     st.divider()
-    col_v1, col_v2 = st.columns(2)
+    st.subheader("🏁 Benchmark Terrain")
+    col_v1, col_v2, col_v3 = st.columns([1, 1, 2])
+    
     reel = col_v1.number_input("Places réelles :", min_value=0, step=1)
-    note = col_v2.text_input("Note")
+    
+    # AJOUT DU MENU PARKNAV
+    parknav = col_v2.selectbox("Parknav :", ["Vert", "Orange", "Rouge", "Gris (N/C)"])
+    
+    note = col_v3.text_input("Note libre")
     
     if st.button("💾 ENVOYER AU SHEETS"):
-        if save_to_google_sheets(st.session_state['save'] + [reel, note]):
+        # On ajoute reel, parknav et note à la liste existante dans session_state
+        if save_to_google_sheets(st.session_state['save'] + [reel, parknav, note]):
             st.balloons()
             st.success("✅ Données enregistrées dans SLOT_Beta1 !")
             del st.session_state['save']
+            st.rerun()
