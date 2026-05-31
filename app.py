@@ -96,14 +96,16 @@ def get_weather(lat, lon):
 
 @st.cache_resource
 def load_assets():
-    try: return joblib.load("modele_SLOT_v1.pkl"), joblib.load("prepr_SLOT_v1.pkl")
-    except: return None, None
+    nom_modele = "modele_SLOT_v1.pkl" # <--- A changer juste pour suivi version APPLI 
+    try: return joblib.load("modele_SLOT_v1.pkl"), joblib.load("prepr_SLOT_v1.pkl"), nom_modele
+    except: return None, None, "Aucun modele detected"
 
-model, prepro = load_assets()
+model, prepro, nom_du_modele = load_assets()
 
 # --- 4. INTERFACE ---
 st.set_page_config(page_title="SLOT V70", layout="wide")
 st.title("🅿️ SLOT - Assistant Terrain")
+st.caption(f"ℹ️ cette app utilise la version **{nom_du_modele}**")
 
 c1, c2, c3 = st.columns([1, 2, 3])
 num_v = c1.text_input("N°")
