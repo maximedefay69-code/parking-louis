@@ -96,7 +96,7 @@ def get_weather(lat, lon):
 
 @st.cache_resource
 def load_assets():
-    try: return joblib.load("modele_lightgbmDA.pkl"), joblib.load("preprocessorDA.pkl")
+    try: return joblib.load("modele_SLOT_v1.pkl"), joblib.load("prepr_SLOT_v1.pkl")
     except: return None, None
 
 model, prepro = load_assets()
