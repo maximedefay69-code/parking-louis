@@ -96,8 +96,8 @@ def get_weather(lat, lon):
 
 @st.cache_resource
 def load_assets():
-    nom_modele = "modele_SLOT_v1.pkl" # <--- A changer juste pour suivi version APPLI 
-    try: return joblib.load("modele_SLOT_v1.pkl"), joblib.load("prepr_SLOT_v1.pkl"), nom_modele
+    nom_modele = "modele_SLOT_v2.pkl" # <--- A changer juste pour suivi version APPLI 
+    try: return joblib.load("modele_SLOT_v2.pkl"), joblib.load("prepr_SLOT_v2.pkl"), nom_modele
     except: return None, None, "Aucun modele detected"
 
 model, prepro, nom_du_modele = load_assets()
